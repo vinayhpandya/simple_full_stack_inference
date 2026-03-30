@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # - job_name: gateway
+  #   static_configs:
+  #     - targets: ["host.docker.internal:9101"]
+  #   metrics_path: /metrics
+
+  # vLLM on laptop localhost:8000 via SSH tunnel (Prometheus in Docker → host.docker.internal)
+  - job_name: vllm_tunnel
+    scheme: https
+    static_configs:
+      - targets: ["vinayharshadpandya27--tinyllama-vllm-vllmserver-serve.modal.run"]
+    metrics_path: /metrics
