@@ -7,6 +7,11 @@ scrape_configs:
   #   static_configs:
   #     - targets: ["host.docker.internal:9101"]
   #   metrics_path: /metrics
+  - job_name: simple-ai-gateway
+    scheme: http
+    static_configs:
+      - targets: [host.docker.internal:8080]
+    metrics_path: /metrics
 
   # vLLM on laptop localhost:8000 via SSH tunnel (Prometheus in Docker → host.docker.internal)
   - job_name: vllm_tunnel

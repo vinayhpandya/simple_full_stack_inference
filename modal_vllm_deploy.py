@@ -52,6 +52,8 @@ def download_model():
     gpu="A10G",
     volumes={"/models": volume},
     # Scale to zero: container shuts down after 5 min of inactivity
+    min_containers=0,           # scale to zero when idle
+    max_containers=1,
     scaledown_window=300,
 )
 class VLLMServer:
