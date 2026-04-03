@@ -7,3 +7,13 @@ datasources:
     isDefault: true
     uid: prometheus
     editable: false
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: prometheus
+ 
