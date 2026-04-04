@@ -6,4 +6,19 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "modal>=1.4.0",
+    "prometheus-client>=0.21.0",
+    "simple-ai-gateway>=0.1.3",
 ]
+
+[project.scripts]
+simple-ai-gateway = "gateway_launcher:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["gateway_launcher", "main", "modal_sglang_deploy", "modal_vllm_deploy"]
+
+[tool.uv]
+package = true
