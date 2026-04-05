@@ -1664,6 +1664,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyscale" },
+    { name = "httpx" },
     { name = "modal" },
     { name = "prometheus-client" },
     { name = "simple-ai-gateway" },
@@ -1672,6 +1673,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "anyscale", specifier = ">=0.26.92" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "modal", specifier = ">=1.4.0" },
     { name = "prometheus-client", specifier = ">=0.21.0" },
     { name = "simple-ai-gateway", specifier = ">=0.1.3" },
