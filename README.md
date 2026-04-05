@@ -1,6 +1,6 @@
 # Simple Full Stack Inference
 
-A production-grade AI inference platform demonstrating a full-stack LLM serving architecture with load balancing, monitoring, and metrics collection.
+A production-grade AI inference platform demonstrating a full-stack LLM serving architecture with multiple inference backends, load balancing, monitoring, and metrics collection.
 
 ## Architecture
 
@@ -20,32 +20,34 @@ A production-grade AI inference platform demonstrating a full-stack LLM serving 
               │    API Gateway       │
               │     (Port 8080)      │
               │  - Metrics endpoint  │
+              │  - Backend routing   │
               └──────────┬──────────┘
                          │
-         ┌───────────────┴───────────────┐
-         │                               │
-         ▼                               ▼
-┌─────────────────┐            ┌─────────────────┐
-│   Prometheus    │            │   vLLM Server   │
-│   (Port 9090)   │◄───────────│   (Port 8000)   │
-│  Metrics Store  │   scrape   │  Modal-hosted   │
-└────────┬────────┘            │  TinyLlama 1.1B │
-         │                     └─────────────────┘
-         ▼
-┌─────────────────┐
-│     Grafana     │
-│   (Port 3000)   │
-│   Dashboards    │
-└─────────────────┘
+         ┌───────────────┼───────────────┐
+         │               │               │
+         ▼               ▼               ▼
+┌─────────────┐  ┌──────────────┐  ┌──────────────────┐
+│ Prometheus  │  │  Modal vLLM  │  │ Anyscale DeepSeek│
+│ (Port 9090) │◄─│  / SGLang    │  │  Ray Serve +     │
+│   Metrics   │  │  TinyLlama   │  │  vLLM DeepSeek   │
+└──────┬──────┘  └──────────────┘  │  V2-Lite-Chat    │
+       │                           └──────────────────┘
+       ▼
+┌─────────────┐
+│   Grafana   │
+│ (Port 3000) │
+│  Dashboards │
+└─────────────┘
 ```
 
 ## Components
 
 | Component | Description | Port |
 |-----------|-------------|------|
-| **vLLM Server** | LLM inference server running TinyLlama-1.1B on Modal | 8000 |
-| **API Gateway** | Request routing and metrics exposure | 8080 |
+| **API Gateway** | Request routing, backend selection, and metrics | 8080 |
 | **Nginx** | Load balancer with SSE streaming support | 80 |
+| **Modal vLLM / SGLang** | TinyLlama-1.1B on Modal GPU (auto-scaling) | — (HTTPS) |
+| **Anyscale DeepSeek** | DeepSeek-V2-Lite-Chat via Ray Serve + vLLM on Anyscale | — (HTTPS) |
 | **Prometheus** | Metrics collection and storage | 9090 |
 | **Grafana** | Metrics visualization and dashboards | 3000 |
 
@@ -54,7 +56,8 @@ A production-grade AI inference platform demonstrating a full-stack LLM serving 
 - Python 3.11+
 - [uv](https://github.com/astral-sh/uv) package manager
 - Docker Desktop (or another Docker engine) running, with Compose available
-- [Modal](https://modal.com) account (for GPU inference)
+- [Modal](https://modal.com) account (for GPU inference via vLLM / SGLang)
+- [Anyscale](https://www.anyscale.com) account (for DeepSeek MoE inference — optional)
 - **Nginx** (optional, for port 80): on macOS, `brew install nginx`; binding to port 80 usually requires `sudo`
 
 ## Setup
@@ -120,6 +123,104 @@ Keep **`type: vllm`** (or **`type: remote`**) for that backend — the PyPI gate
 #### After either deploy
 
 Copy the exact HTTPS origin from the CLI or [Modal dashboard](https://modal.com), append **`/v1/chat/completions`**, update **`gateway_config.yaml`**, then restart **`uv run simple-ai-gateway`**.
+
+---
+
+### 4b. (Optional) Deploy DeepSeek MoE to Anyscale
+
+This deploys **DeepSeek-V2-Lite-Chat** (16B MoE / 2.4B active params) via Ray Serve + vLLM on an Anyscale-managed A10G GPU.
+
+#### Step 1 — Install the Anyscale CLI
+
+```bash
+uv add anyscale
+```
+
+#### Step 2 — Create an Anyscale account and API key
+
+1. Sign up at [anyscale.com](https://www.anyscale.com) (free trial available).
+2. Go to **Settings → API Keys** and create a new key.
+3. Authenticate the CLI (interactive prompt — paste the key when asked):
+
+```bash
+uv run anyscale auth set
+```
+
+#### Step 3 — Create a cloud
+
+In the [Anyscale console](https://console.anyscale.com), navigate to **Clouds** and create a cloud (the default name is **`Anyscale Cloud`**). Anyscale will provision AWS/GCP resources in its own managed account — no AWS credentials needed for the managed option.
+
+If you renamed your cloud, update `compute_config.cloud` in `anyscale_service.yaml` to match.
+
+#### Step 4 — Accept the DeepSeek model terms and store your HF token
+
+Accept the HuggingFace gated-model terms at:  
+<https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat>
+
+Then open **`anyscale_service.yaml`** and fill in your HuggingFace token:
+
+```yaml
+env_vars:
+  HF_TOKEN: "hf_your_token_here"   # ← paste here; do not commit this file
+  ...
+```
+
+> **Important:** `anyscale_service.yaml` is already in `.gitignore`. Never commit it with a real token.
+
+#### Step 5 — Deploy the service
+
+```bash
+uv run anyscale service deploy -f anyscale_service.yaml
+```
+
+The first deploy takes **10–20 minutes** (GPU provisioning + model download). You will see:
+
+```
+(anyscale) Starting new service 'deepseek-moe'.
+(anyscale) Service 'deepseek-moe' is now running.
+(anyscale) Base URL: https://deepseek-moe-<hash>.cld_<id>.s.anyscaleuserdata.com
+```
+
+#### Step 6 — Update the gateway
+
+Copy the **Base URL** from the deploy output (or from [console.anyscale.com/services](https://console.anyscale.com/services) → `deepseek-moe` → **Base URL**) and update `gateway_config.yaml`:
+
+```yaml
+backends:
+  anyscale_deepseek:
+    type: vllm
+    url: https://deepseek-moe-<hash>.cld_<id>.s.anyscaleuserdata.com/v1/chat/completions
+```
+
+To make DeepSeek the default backend, also change:
+
+```yaml
+default_backend: anyscale_deepseek
+```
+
+Restart the gateway after any config change:
+
+```bash
+uv run simple-ai-gateway
+```
+
+#### Managing the Anyscale service (cost control)
+
+Unlike Modal, Anyscale Ray Serve services **stay running (and billing) until you explicitly terminate them**. A `g5.2xlarge` (A10G) costs roughly **$1–2/hour** while the service is up.
+
+**Terminate** when not in use:
+
+```bash
+uv run anyscale service terminate --name deepseek-moe
+```
+
+**Redeploy** when you need it again:
+
+```bash
+uv run anyscale service deploy -f anyscale_service.yaml
+```
+
+Check remaining credits / current spend at [console.anyscale.com/v2/billing](https://console.anyscale.com/v2/billing).
 
 ### 5. Start the Monitoring Stack
 
@@ -194,6 +295,42 @@ curl -s -X POST "http://127.0.0.1:8080/v1/chat/completions" \
     ]
   }'
 ```
+
+### DeepSeek-V2-Lite-Chat (Anyscale MoE backend)
+
+Send requests to the `anyscale_deepseek` backend using the `X-Backend` header (leaves `modal_vllm` as default) or by setting `default_backend: anyscale_deepseek` in `gateway_config.yaml`.
+
+**Via Nginx (port 80) — targeting DeepSeek explicitly:**
+
+```bash
+curl -s -X POST "http://localhost/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "X-Backend: anyscale_deepseek" \
+  -d '{
+    "model": "deepseek",
+    "messages": [
+      {"role": "user", "content": "Explain mixture-of-experts in one sentence."}
+    ],
+    "max_tokens": 60
+  }'
+```
+
+**Direct to API gateway (port 8080):**
+
+```bash
+curl -s -X POST "http://127.0.0.1:8080/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "X-Backend: anyscale_deepseek" \
+  -d '{
+    "model": "deepseek",
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ],
+    "max_tokens": 50
+  }'
+```
+
+The `model` field must match `DEEPSEEK_SERVED_NAME` in `anyscale_service.yaml` (default: **`deepseek`**). Anyscale keeps the service warm as long as it is running — no cold-start penalty after the first deploy.
 
 ### Streaming responses
 
@@ -284,6 +421,15 @@ Key settings for LLM inference:
 
 **`command not found: modal`**
 - Use `uv run modal ...` from the repo root after `uv sync`
+
+**Anyscale deployment issues**
+
+- **`No such command 'secret'`** — This CLI version has no `secret` command; put `HF_TOKEN` directly in `anyscale_service.yaml` under `env_vars` and keep the file out of git (it is already in `.gitignore`).
+- **`Cluster environment with image URI … not found`** — Remove the `image_uri` field from `anyscale_service.yaml`; Anyscale uses its default managed Ray image and installs packages from `requirements`.
+- **`ServiceConfig.__init__() got an unexpected keyword argument 'ray_serve_config'`** — The installed CLI uses the new schema: use `applications` (list) instead of `ray_serve_config`, `head_node` instead of `head_node_type`, and `worker_nodes` instead of `worker_node_types`.
+- **Service URL not visible in `anyscale service list`** — Run `uv run anyscale service status --name deepseek-moe` or check the [Anyscale console](https://console.anyscale.com/services) for the **Base URL**.
+- **`model` field mismatch** — The `model` sent in the request body must match `DEEPSEEK_SERVED_NAME` in `anyscale_service.yaml` (default: `deepseek`). Sending a different name causes a 404 from vLLM.
+- **Logs** — View Ray Serve / vLLM worker logs in the [Anyscale console](https://console.anyscale.com/services) → `deepseek-moe` → **Logs** tab.
 
 **`nginx: command not found`**
 - Install Nginx (e.g. `brew install nginx` on macOS)

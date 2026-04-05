@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anyscale>=0.26.92",
     "modal>=1.4.0",
     "prometheus-client>=0.21.0",
     "simple-ai-gateway>=0.1.3",
