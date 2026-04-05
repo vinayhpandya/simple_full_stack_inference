@@ -1,0 +1,32 @@
+# Used by https://pypi.org/project/simple-ai-gateway/ when SIMPLE_AI_GATEWAY_CONFIG points here.
+#
+# You MUST replace `modal_vllm.url` with your real host (not a placeholder), or TLS will fail:
+#   1. From repo root:  uv run modal deploy modal_vllm_deploy.py
+#   2. Web endpoint uses fixed label `tinyllama-openai`, e.g.
+#      https://<you>--tinyllama-openai.modal.run/v1/chat/completions
+#      (Always confirm the exact URL in `modal deploy` output or the Modal dashboard.)
+#   3. Set url to that origin + /v1/chat/completions (no space, exact hostname from Modal).
+
+default_backend: anyscale_deepseek
+
+rate_limiter:
+  storage: memory
+
+backends:
+  local:
+    type: local
+    url: http://127.0.0.1:8081
+  modal_vllm:
+    # Use vllm or remote for any OpenAI-compatible HTTP backend (vLLM, SGLang, etc.).
+    type: vllm
+    # Must include /v1/chat/completions — the gateway POSTs to this full URL (not just the origin).
+    # url: https://YOUR_NAME--tinyllama-openai.modal.run/v1/chat/completions # example url
+    # url: https://vivianxu1999--tinyllama-openai.modal.run/v1/chat/completions # vllm
+    url: https://vivianxu1999--tinyllama-sglang.modal.run/v1/chat/completions # sglang
+  anyscale_deepseek:
+    # DeepSeek-V2-Lite-Chat served via Ray Serve + vLLM on Anyscale.
+    # Replace the URL after running: anyscale service deploy anyscale_service.yaml
+    # The service URL is printed in the deploy output and visible in the Anyscale dashboard.
+    # No Modal-style 303 redirects — this is a plain HTTPS endpoint.
+    type: vllm
+    url: https://deepseek-moe-5ar9u.cld-h3qaavycu4v5kv8a.s.anyscaleuserdata.com/v1/chat/completions
