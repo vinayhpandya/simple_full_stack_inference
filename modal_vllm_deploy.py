@@ -6,16 +6,16 @@ import modal
 
 # At `modal deploy` time: MODAL_MIN_CONTAINERS=1 keeps one GPU replica warm (lower latency, higher cost).
 # Default 0 = scale to zero when idle (first request after idle is often 1–5+ minutes).
-_MIN_CONTAINERS = max(0, int(os.environ.get("MODAL_MIN_CONTAINERS", "0")))
+_MIN_CONTAINERS = max(1, int(os.environ.get("MODAL_MIN_CONTAINERS", "0")))
 # Seconds to keep containers up after traffic stops (only when min_containers=0).
 _SCALEDOWN_WINDOW = max(60, int(os.environ.get("MODAL_SCALEDOWN_WINDOW", "300")))
 
 # ---------------------------------------------------------------------------
 # Constants — change MODEL_ID to swap models
 # ---------------------------------------------------------------------------
-MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-MODEL_DIR = "/models/tinyllama"
-SERVED_MODEL_NAME = "tinyllama"
+MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
+MODEL_DIR = "/models/llama31-8b"
+SERVED_MODEL_NAME = "llama3.1-8b-chunked-prefill"
 VLLM_PORT = 8000
 
 # ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ def download_model() -> None:
     )
 
 
-def wait_for_vllm(timeout: int = 120) -> None:
+def wait_for_vllm(timeout: int = 300) -> None:
     import urllib.request
 
     url = f"http://localhost:{VLLM_PORT}/health"
@@ -84,13 +84,14 @@ def wait_for_vllm(timeout: int = 120) -> None:
     max_containers=1,
     scaledown_window=_SCALEDOWN_WINDOW,
     timeout=60 * 30,
+    secrets=[modal.Secret.from_name("my-huggingface-secret")],
 )
 @modal.web_server(
     port=VLLM_PORT,
     startup_timeout=180,
     # Stable subdomain: https://<workspace>--tinyllama-openai.modal.run
     # (Without `label`, Modal auto-picks a suffix; guessing it causes 404s.)
-    label="tinyllama-openai",
+    label="llama31-8b-chunked-prefill-openai",
 )
 def serve() -> None:
     """
@@ -122,6 +123,9 @@ def serve() -> None:
         "half",
         "--served-model-name",
         SERVED_MODEL_NAME,
+        "--enable-chunked-prefill",
+        "--max-num-batched-tokens", "4096",
+        "--max-model-len", "30560"
     ]
 
     print(f"Starting vLLM server on port {VLLM_PORT}...")
