@@ -12,10 +12,14 @@ scrape_configs:
     static_configs:
       - targets: [host.docker.internal:8080]
     metrics_path: /metrics
-
+  
   # vLLM on laptop localhost:8000 via SSH tunnel (Prometheus in Docker → host.docker.internal)
   - job_name: vllm_tunnel
     scheme: https
+    scrape_interval: 60s
+    scrape_timeout: 55s
     static_configs:
-      - targets: ["vinayharshadpandya27--tinyllama-vllm-vllmserver-serve.modal.run"]
+      - targets:
+        - "vinayharshadpandya27--llama31-8b-chunked-prefill-openai.modal.run"
+        - "vinayharshadpandya27--llama31-openai.modal.run"
     metrics_path: /metrics
