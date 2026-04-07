@@ -126,9 +126,23 @@ Copy the exact HTTPS origin from the CLI or [Modal dashboard](https://modal.com)
 
 ---
 
-### 4b. (Optional) Deploy DeepSeek MoE to Anyscale
+### 4b. (Optional) Deploy DeepSeek MoE to Anyscale via Ray Serve
 
-This deploys **DeepSeek-V2-Lite-Chat** (16B MoE / 2.4B active params) via Ray Serve + vLLM on an Anyscale-managed A10G GPU.
+This deploys **DeepSeek-V2-Lite-Chat** — a **Mixture-of-Experts (MoE)** model with 16B total parameters but only **2.4B active parameters per token** — via **Ray Serve + vLLM** on Anyscale-managed GPUs.
+
+#### Why Ray Serve for a MoE model?
+
+DeepSeek-V2-Lite uses a **Mixture-of-Experts** architecture: rather than activating all 16B parameters for every token, a learned router selects a small subset of "expert" FFN layers (2.4B active). This gives you near-16B quality at ~2.4B compute cost per forward pass — but the full 16B weights still need to fit in GPU memory.
+
+**Ray Serve** is the right orchestration layer here for four reasons:
+
+1. **GPU-aware scheduling** — You declare `ray_actor_options={"num_gpus": 2}` and Ray's cluster scheduler owns that allocation. It will never double-book those GPUs across replicas, and it treats vLLM's tensor-parallel worker sub-processes as first-class Ray actors with their own GPU slots.
+
+2. **Real back-pressure** — `max_ongoing_requests=8` means Ray Serve queues incoming requests at the proxy once 8 are in flight, instead of hammering a saturated vLLM process. With a plain subprocess + httpx proxy the gateway sees only HTTP connections and cannot apply this pressure.
+
+3. **Zero-downtime rolling deploys** — On redeploy, Ray Serve keeps the old replica serving traffic while the new one loads the model (~2–3 min for DeepSeek). Only after the health check passes does it drain the old replica. A subprocess approach would gap out entirely during model load.
+
+4. **Accurate autoscaling** — Ray Serve counts in-flight requests (not open connections) per replica, giving the autoscaler a true picture of load to scale up/down replicas correctly.
 
 #### Step 1 — Install the Anyscale CLI
 
@@ -136,11 +150,10 @@ This deploys **DeepSeek-V2-Lite-Chat** (16B MoE / 2.4B active params) via Ray Se
 uv add anyscale
 ```
 
-#### Step 2 — Create an Anyscale account and API key
+#### Step 2 — Create an Anyscale account and authenticate
 
 1. Sign up at [anyscale.com](https://www.anyscale.com) (free trial available).
-2. Go to **Settings → API Keys** and create a new key.
-3. Authenticate the CLI (interactive prompt — paste the key when asked):
+2. Authenticate the CLI (interactive prompt — paste your API key when asked):
 
 ```bash
 uv run anyscale auth set
@@ -148,7 +161,7 @@ uv run anyscale auth set
 
 #### Step 3 — Create a cloud
 
-In the [Anyscale console](https://console.anyscale.com), navigate to **Clouds** and create a cloud (the default name is **`Anyscale Cloud`**). Anyscale will provision AWS/GCP resources in its own managed account — no AWS credentials needed for the managed option.
+In the [Anyscale console](https://console.anyscale.com), navigate to **Clouds** and create a cloud (the default name is **`Anyscale Cloud`**). Anyscale provisions AWS/GCP resources in its own managed account — no AWS credentials needed.
 
 If you renamed your cloud, update `compute_config.cloud` in `anyscale_service.yaml` to match.
 
@@ -162,7 +175,6 @@ Then open **`anyscale_service.yaml`** and fill in your HuggingFace token:
 ```yaml
 env_vars:
   HF_TOKEN: "hf_your_token_here"   # ← paste here; do not commit this file
-  ...
 ```
 
 > **Important:** `anyscale_service.yaml` is already in `.gitignore`. Never commit it with a real token.
@@ -173,26 +185,44 @@ env_vars:
 uv run anyscale service deploy -f anyscale_service.yaml
 ```
 
+The service runs on a **`g5.12xlarge`** (4× NVIDIA A10G, 96 GB VRAM total) with `tensor_parallel_size=2` — splitting the model weights across 2 GPUs gives 48 GB per shard, comfortably fitting DeepSeek-V2-Lite-Chat in bfloat16 with room for the KV cache.
+
 The first deploy takes **10–20 minutes** (GPU provisioning + model download). You will see:
 
 ```
 (anyscale) Starting new service 'deepseek-moe'.
 (anyscale) Service 'deepseek-moe' is now running.
-(anyscale) Base URL: https://deepseek-moe-<hash>.cld_<id>.s.anyscaleuserdata.com
+(anyscale) Base URL: https://deepseek-moe-<hash>.cld-<id>.s.anyscaleuserdata.com
 ```
 
-#### Step 6 — Update the gateway
+#### Step 6 — Get the service URL and auth token
 
-Copy the **Base URL** from the deploy output (or from [console.anyscale.com/services](https://console.anyscale.com/services) → `deepseek-moe` → **Base URL**) and update `gateway_config.yaml`:
+```bash
+uv run anyscale service status --name deepseek-moe
+```
+
+This prints both the `query_url` and the **`query_auth_token`** — a per-service bearer token that Anyscale's load balancer requires on every request. Note them down:
+
+```
+query_url: https://deepseek-moe-<hash>.cld-<id>.s.anyscaleuserdata.com
+query_auth_token: <your-token>
+```
+
+> The `query_auth_token` is **different** from your Anyscale CLI credentials. It is generated per service and is the only token accepted by the service endpoint.
+
+#### Step 7 — Update the gateway
+
+Update `gateway_config.yaml` with the URL and auth token:
 
 ```yaml
 backends:
   anyscale_deepseek:
     type: vllm
-    url: https://deepseek-moe-<hash>.cld_<id>.s.anyscaleuserdata.com/v1/chat/completions
+    url: https://deepseek-moe-<hash>.cld-<id>.s.anyscaleuserdata.com/v1/chat/completions
+    api_key: <your-query_auth_token>
 ```
 
-To make DeepSeek the default backend, also change:
+To make DeepSeek the default backend:
 
 ```yaml
 default_backend: anyscale_deepseek
@@ -201,12 +231,12 @@ default_backend: anyscale_deepseek
 Restart the gateway after any config change:
 
 ```bash
-uv run simple-ai-gateway
+uv run python gateway_launcher.py
 ```
 
 #### Managing the Anyscale service (cost control)
 
-Unlike Modal, Anyscale Ray Serve services **stay running (and billing) until you explicitly terminate them**. A `g5.2xlarge` (A10G) costs roughly **$1–2/hour** while the service is up.
+Unlike Modal, Anyscale Ray Serve services **stay running (and billing) until you explicitly terminate them**. A `g5.12xlarge` costs roughly **$5–6/hour** while the service is up.
 
 **Terminate** when not in use:
 
@@ -298,39 +328,75 @@ curl -s -X POST "http://127.0.0.1:8080/v1/chat/completions" \
 
 ### DeepSeek-V2-Lite-Chat (Anyscale MoE backend)
 
-Send requests to the `anyscale_deepseek` backend using the `X-Backend` header (leaves `modal_vllm` as default) or by setting `default_backend: anyscale_deepseek` in `gateway_config.yaml`.
+The `model` field must match `DEEPSEEK_SERVED_NAME` in `anyscale_service.yaml` (default: **`deepseek`**). Anyscale keeps the service warm as long as it is running — no cold-start penalty after the first deploy.
 
-**Via Nginx (port 80) — targeting DeepSeek explicitly:**
+**Step 1 — Get your service auth token**
+
+Every request to the Anyscale service endpoint requires a bearer token. Retrieve it with:
 
 ```bash
-curl -s -X POST "http://localhost/v1/chat/completions" \
+uv run anyscale service status --name deepseek-moe
+# → look for:  query_auth_token: <token>
+```
+
+**Step 2 — Test directly against Anyscale (no gateway)**
+
+```bash
+curl https://<your-service-url>/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Backend: anyscale_deepseek" \
+  -H "Authorization: Bearer <your-query_auth_token>" \
   -d '{
     "model": "deepseek",
-    "messages": [
-      {"role": "user", "content": "Explain mixture-of-experts in one sentence."}
-    ],
+    "messages": [{"role": "user", "content": "What is 2+2?"}],
+    "max_tokens": 64
+  }'
+```
+
+**Step 3 — Test streaming directly against Anyscale**
+
+```bash
+curl https://<your-service-url>/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-query_auth_token>" \
+  -d '{
+    "model": "deepseek",
+    "messages": [{"role": "user", "content": "Explain mixture-of-experts in one sentence."}],
+    "stream": true,
+    "max_tokens": 128
+  }'
+```
+
+**Step 4 — Test through the gateway (full stack)**
+
+Once `api_key` is set in `gateway_config.yaml` and the gateway is running, the gateway injects the bearer token automatically:
+
+```bash
+# Via Nginx (port 80):
+curl -s -X POST "http://localhost/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek",
+    "messages": [{"role": "user", "content": "Hello from the gateway!"}],
+    "max_tokens": 60
+  }'
+
+# Direct to gateway (port 8080):
+curl -s -X POST "http://127.0.0.1:8080/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek",
+    "messages": [{"role": "user", "content": "Hello from the gateway!"}],
     "max_tokens": 60
   }'
 ```
 
-**Direct to API gateway (port 8080):**
+**Step 5 — Health check**
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8080/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -H "X-Backend: anyscale_deepseek" \
-  -d '{
-    "model": "deepseek",
-    "messages": [
-      {"role": "user", "content": "Hello!"}
-    ],
-    "max_tokens": 50
-  }'
+curl https://<your-service-url>/health \
+  -H "Authorization: Bearer <your-query_auth_token>"
+# → {"status": "ok"}
 ```
-
-The `model` field must match `DEEPSEEK_SERVED_NAME` in `anyscale_service.yaml` (default: **`deepseek`**). Anyscale keeps the service warm as long as it is running — no cold-start penalty after the first deploy.
 
 ### Streaming responses
 
@@ -424,9 +490,13 @@ Key settings for LLM inference:
 
 **Anyscale deployment issues**
 
+- **`{"error": Requested resource not found"}`** — The service endpoint requires its own **`query_auth_token`**, not your CLI credentials. Run `uv run anyscale service status --name deepseek-moe` and use the printed `query_auth_token` as the bearer token: `Authorization: Bearer <query_auth_token>`. Set it as `api_key` in `gateway_config.yaml` so the gateway forwards it automatically.
 - **`No such command 'secret'`** — This CLI version has no `secret` command; put `HF_TOKEN` directly in `anyscale_service.yaml` under `env_vars` and keep the file out of git (it is already in `.gitignore`).
 - **`Cluster environment with image URI … not found`** — Remove the `image_uri` field from `anyscale_service.yaml`; Anyscale uses its default managed Ray image and installs packages from `requirements`.
 - **`ServiceConfig.__init__() got an unexpected keyword argument 'ray_serve_config'`** — The installed CLI uses the new schema: use `applications` (list) instead of `ray_serve_config`, `head_node` instead of `head_node_type`, and `worker_nodes` instead of `worker_node_types`.
+- **`CUDA out of memory` during model load** — Lower `gpu_memory_utilization` in `AsyncEngineArgs` or switch to a larger instance (`g5.12xlarge` with `TENSOR_PARALLEL_SIZE=2` gives 48 GB per shard). The `gpu_memory_utilization` parameter only controls KV cache; if the OOM is during weight loading, only more VRAM or tensor parallelism helps.
+- **`ValueError: The model's max seq len (163840) is larger than the maximum number of tokens that can be stored in KV cache`** — Add `max_model_len=16384` to `AsyncEngineArgs` to cap the context window. The model's native 163K context requires too much KV cache; 16K is sufficient for most use cases.
+- **`AttributeError: TokenizersBackend has no attribute all_special_tokens_extended`** — Pin `transformers` to a compatible version with `transformers>=4.46.0,<4.50` in `anyscale_service.yaml` requirements. Newer `transformers` dropped this attribute that `vllm==0.6.6` calls during tokenizer init.
 - **Service URL not visible in `anyscale service list`** — Run `uv run anyscale service status --name deepseek-moe` or check the [Anyscale console](https://console.anyscale.com/services) for the **Base URL**.
 - **`model` field mismatch** — The `model` sent in the request body must match `DEEPSEEK_SERVED_NAME` in `anyscale_service.yaml` (default: `deepseek`). Sending a different name causes a 404 from vLLM.
 - **Logs** — View Ray Serve / vLLM worker logs in the [Anyscale console](https://console.anyscale.com/services) → `deepseek-moe` → **Logs** tab.
