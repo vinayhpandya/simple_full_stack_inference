@@ -1,3 +1,6 @@
+# USAGE: Copy this file to gateway_config.yaml (gitignored) and fill in your real URLs and keys.
+#   cp gateway_config.example.yaml gateway_config.yaml
+#
 # Used by https://pypi.org/project/simple-ai-gateway/ when SIMPLE_AI_GATEWAY_CONFIG points here.
 #
 # You MUST replace `modal_vllm.url` with your real host (not a placeholder), or TLS will fail:
@@ -29,4 +32,6 @@ backends:
     # The service URL is printed in the deploy output and visible in the Anyscale dashboard.
     # No Modal-style 303 redirects — this is a plain HTTPS endpoint.
     type: vllm
-    url: https://deepseek-moe-5ar9u.cld-h3qaavycu4v5kv8a.s.anyscaleuserdata.com/v1/chat/completions
+    url: https://YOUR_SERVICE.s.anyscaleuserdata.com/v1/chat/completions
+    # After deploying, retrieve the token with: anyscale service status --name deepseek-moe
+    api_key: YOUR_ANYSCALE_QUERY_AUTH_TOKEN
