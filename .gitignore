@@ -9,4 +9,5 @@ wheels/
 # Virtual environments
 .venv
 anyscale_service.yaml
+gateway_config.yaml
 gateway_launcher.py
