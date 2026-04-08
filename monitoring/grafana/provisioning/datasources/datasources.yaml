@@ -15,5 +15,9 @@ datasources:
     editable: false
     jsonData:
       tracesToLogsV2:
+<<<<<<< HEAD
         datasourceUid: prometheus
  
+=======
+        datasourceUid: prometheus
+>>>>>>> b226057 (Add locustfile and LMcache config)
