@@ -173,6 +173,3 @@ def serve() -> None:
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     wait_for_server(_READY_TIMEOUT_SEC)
-    # serve() returns here. Modal's @web_server decorator keeps the container alive and
-    # proxies all HTTP traffic to SGLang on SERVER_PORT. Do NOT call proc.wait() here —
-    # blocking serve() prevents Modal from routing requests to the port.

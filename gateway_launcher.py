@@ -120,6 +120,13 @@ def main() -> None:
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 }
+                # Inject bearer token when the backend has an api_key set.
+                # (e.g. Anyscale services require Authorization: Bearer <token>).
+                # api_key is stamped onto RemoteBackend instances by the patched
+                # get_backend_instance below — the library's factory ignores it.
+                api_key = getattr(self, "_api_key", None)
+                if api_key:
+                    headers_post["Authorization"] = f"Bearer {api_key}"
                 headers_get = {"Accept": "application/json"}
                 resp = await client.post(
                     self.url, json=payload, headers=headers_post, timeout=timeout
@@ -167,9 +174,27 @@ def main() -> None:
 
     _attach_prometheus(sgw_app)
 
+    # Patch get_backend_instance to forward `api_key` from the YAML config
+    # onto the backend instance, so _generate_with_long_timeout can use it.
+    from simple_ai_gateway import backends as _backends_mod
+    _orig_get_backend = _backends_mod.get_backend_instance
+
+    def _get_backend_with_api_key(model_name, config):
+        backend = _orig_get_backend(model_name, config)
+        cfg = config["backends"].get(model_name)
+        if not cfg:
+            cfg = config["backends"][config["default_backend"]]
+        api_key = cfg.get("api_key", "")
+        if api_key:
+            backend._api_key = api_key
+        return backend
+
+    _backends_mod.get_backend_instance = _get_backend_with_api_key
+
     # Replace the stock /v1/chat/completions route with FullChatRequest so that
     # max_tokens and other OpenAI fields aren't silently dropped at parse time.
-    from simple_ai_gateway.backends import get_backend_instance
+    # Use _backends_mod.get_backend_instance (not a local import) so the patched
+    # version above (which forwards api_key) is always called.
     from simple_ai_gateway.main import (
         CONFIG,
         generate_stream,
@@ -191,7 +216,7 @@ def main() -> None:
         queue_time = time.perf_counter() - request.state.arrival_time
         req_id = x_request_id or str(uuid.uuid4())
         try:
-            backend = get_backend_instance(chat_req.model, CONFIG)
+            backend = _backends_mod.get_backend_instance(chat_req.model, CONFIG)
             reply = await backend.generate(chat_req)
         except Exception as e:
             reply = f"Gateway Error: {type(e).__name__}: {e}"
