@@ -1,0 +1,4 @@
+concurrency,total_requests,success_count,error_count,error_rate_%,ttft_p50_ms,ttft_p90_ms,ttft_p99_ms,latency_p50_ms,latency_p90_ms,latency_p99_ms,tpot_p50_ms,tpot_p90_ms,tpot_p99_ms,itl_p50_ms,itl_p90_ms,itl_p99_ms,requests_per_sec,throughput_tokens_per_sec,input_tokens_p50,input_tokens_p90,input_tokens_p99,output_tokens_p50,output_tokens_p90,output_tokens_p99
+1,20,20,0,0.0,640.8,872.24,1605.81,22171.27,26204.26,26220.18,35.87,36.31,38.17,0.7,104.78,147.79,0.045,27.03,1032,1041,1043,601,710,716
+2,20,20,0,0.0,22080.02,23649.74,24179.7,42183.91,45077.78,45563.19,35.94,36.08,36.1,0.76,104.49,117.07,0.049,27.24,1032,1041,1042,596,636,650
+4,20,16,4,20.0,59480.7,77897.2,77952.34,82353.8,97071.5,98291.71,35.97,36.01,36.05,0.76,104.13,114.95,0.047,22.5,1036,1040,1041,593,700,1077

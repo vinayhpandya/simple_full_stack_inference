@@ -1,0 +1,2 @@
+request_rate,total_requests,success_count,error_count,error_rate_%,ttft_p50_ms,ttft_p90_ms,ttft_p99_ms,latency_p50_ms,latency_p90_ms,latency_p99_ms,tpot_p50_ms,tpot_p90_ms,tpot_p99_ms,itl_p50_ms,itl_p90_ms,itl_p99_ms,requests_per_sec,throughput_tokens_per_sec,input_tokens_p50,input_tokens_p90,input_tokens_p99,output_tokens_p50,output_tokens_p90,output_tokens_p99
+1.0,20,8,12,60.0,61674.97,117026.48,117026.48,73441.92,138714.82,138714.82,36.39,37.69,37.69,0.75,110.18,130.78,0.14,26.08,252,1344,1344,444,740,740
