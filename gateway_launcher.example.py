@@ -1,4 +1,13 @@
-"""Run the PyPI `simple-ai-gateway` with this repo's `gateway_config.yaml` by default."""
+"""
+Gateway launcher example using `simple-ai-gateway`.
+
+USAGE:
+  Copy this file to gateway_launcher.py (which is gitignored) and customise it
+  for your own gateway. This lets you swap in a different gateway library, add
+  auth middleware, or change routing logic without git tracking your changes.
+
+  cp gateway_launcher.example.py gateway_launcher.py
+"""
 
 # NOTE: No `from __future__ import annotations` here — FastAPI resolves route parameter
 # types by name from the module's global namespace. Postponed evaluation (PEP 563) would
