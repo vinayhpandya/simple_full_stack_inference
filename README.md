@@ -17,6 +17,15 @@ A production-grade AI inference platform demonstrating a full-stack LLM serving 
                          │
                          ▼
               ┌─────────────────────┐
+              │  LangGraph Agent    │  (optional)
+              │     (Port 8090)     │
+              │  - ReAct loop       │
+              │  - Web search       │
+              │  - Calculator       │
+              └──────────┬──────────┘
+                         │
+                         ▼
+              ┌─────────────────────┐
               │    API Gateway       │
               │     (Port 8080)      │
               │  - Metrics endpoint  │
@@ -436,6 +445,206 @@ MODAL_SCALEDOWN_WINDOW=900 MODAL_MIN_CONTAINERS=0 uv run modal deploy modal_sgla
 ```
 
 Environment variables are read when **`modal deploy`** runs (they are baked into the deployed Function config).
+
+## LangGraph Agent Layer
+
+An optional agentic layer that sits in front of the gateway. It intercepts every
+chat request, runs a **ReAct loop** (reason → act → observe), calls tools if needed,
+then forwards the enriched context to the LLM via the gateway.
+
+```
+Client
+  │
+  ▼ POST /v1/chat/completions (port 8090)
+agent_launcher.py
+  │  LangGraph ReAct loop:
+  │    1. Send messages + tool definitions to LLM
+  │    2. If LLM emits a tool call → execute tool → append result → repeat
+  │    3. If LLM returns a plain response → done
+  │
+  ▼ POST /v1/chat/completions (port 8080)
+gateway_launcher.py  →  Anyscale / Modal / local backend
+```
+
+### Tools included
+
+| Tool | Description |
+|---|---|
+| `web_search` | DuckDuckGo search — no API key required |
+| `calculator` | Safe AST-based arithmetic evaluator — no `eval`, restricted to safe ops |
+
+### Prerequisites
+
+The gateway must already be configured and running (port 8080) before starting
+the agent. Follow the main setup steps first:
+
+1. `gateway_config.yaml` exists and has a valid backend URL (copy from `gateway_config.example.yaml`)
+2. Your inference backend (Anyscale or Modal) is deployed and reachable
+3. `uv sync` has been run at least once
+
+### Setup
+
+```bash
+# Copy the example — agent_launcher.py is gitignored so you can customise freely
+cp agent_launcher.example.py agent_launcher.py
+
+# Dependencies are already in pyproject.toml; sync if not done yet
+uv sync
+```
+
+### Run
+
+```bash
+# Terminal 1 — start the gateway (port 8080)
+uv run simple-ai-gateway
+
+# Terminal 2 — start the agent (port 8090)
+uv run python agent_launcher.py
+```
+
+You should see:
+
+```
+[agent] Starting LangGraph agent on port 8090
+[agent] Gateway: http://localhost:8080  Model: deepseek
+[agent] Tools: ['web_search', 'calculator']
+INFO:     Uvicorn running on http://0.0.0.0:8090
+```
+
+Environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `GATEWAY_URL` | `http://localhost:8080` | Gateway base URL |
+| `GATEWAY_MODEL` | `deepseek` | Model name sent in requests |
+| `AGENT_PORT` | `8090` | Port the agent listens on |
+
+### Test
+
+**1. Health check** — confirms the agent is up:
+
+```bash
+curl http://localhost:8090/health
+# → {"status":"ok","gateway":"http://localhost:8080","model":"deepseek"}
+```
+
+**2. Simple question** — no tools needed, goes straight to the LLM:
+
+```bash
+curl http://localhost:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"What is the capital of France?"}]}'
+```
+
+**3. Calculator** — should trigger the `calculator` tool:
+
+```bash
+curl http://localhost:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"What is (17 * 43) + 144?"}]}'
+```
+
+**4. Web search** — should trigger the `web_search` tool:
+
+```bash
+curl http://localhost:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"What happened in AI news this week?"}]}'
+```
+
+### Observability
+
+When a tool is called, the agent terminal prints:
+
+```
+[agent] 1 tool round(s) before final answer
+```
+
+If you see this, the full ReAct loop fired: the LLM emitted a tool call, the tool
+ran, the result was appended to the message list, and the LLM produced a final
+answer using that result.
+
+If the terminal is silent on that line, the model answered directly without
+invoking any tools (either intentionally, or because it lacks function-calling
+support — see below).
+
+### Model compatibility
+
+Tool calling only works when the LLM emits a structured `tool_calls` response in
+OpenAI function-calling format. **Smaller models (e.g. DeepSeek-V2-Lite-Chat)
+often do not support this reliably** — they may describe their intent to use a
+tool in plain text but never emit the required JSON, so LangGraph never fires the
+tool.
+
+Models with reliable tool-calling support:
+
+- `Qwen/Qwen2.5-7B-Instruct` (recommended — fits on a single A10G)
+- `mistralai/Mistral-7B-Instruct-v0.3`
+- GPT-4 class models via OpenAI-compatible endpoints
+
+To switch the backend model, update `DEEPSEEK_MODEL_ID` in `anyscale_service.yaml`
+and redeploy:
+
+```bash
+uv run anyscale service deploy -f anyscale_service.yaml
+```
+
+### Improving tool-call reliability with a system prompt
+
+If your model sometimes ignores tools, add a system prompt to `agent_launcher.py`
+that explicitly instructs it to use them:
+
+```python
+_SYSTEM_PROMPT = (
+    "You are a helpful assistant with access to two tools:\n"
+    "- web_search: use this for ANY question about recent events, current news, "
+    "live data, or anything that may have changed after your training cutoff.\n"
+    "- calculator: use this for ANY mathematical expression or calculation.\n"
+    "Always prefer calling a tool over answering from memory when the question "
+    "involves current information or arithmetic."
+)
+
+def _to_lc_messages(messages):
+    result = []
+    has_system = any(m.role == "system" for m in messages)
+    if not has_system:
+        result.append(SystemMessage(content=_SYSTEM_PROMPT))
+    for m in messages:
+        ...
+    return result
+```
+
+### Adding your own tools
+
+Define a new tool in `agent_launcher.py` using the `@tool` decorator and add it
+to the `TOOLS` list:
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def my_tool(input: str) -> str:
+    """Description of what this tool does — the LLM uses this to decide when to call it."""
+    return "result"
+
+TOOLS = [web_search, calculator, my_tool]
+```
+
+The docstring is critical — the LLM reads it to decide whether to invoke the tool.
+
+### Troubleshooting
+
+**`{"detail":"Agent error: Connection error."}`**
+The gateway is not running on port 8080. Start it first with `uv run simple-ai-gateway`.
+
+**`{"detail":"Agent error: ...502 Bad Gateway..."}`**
+The gateway is running but the inference backend (Anyscale/Modal) is down or terminated. Redeploy the backend.
+
+**Tool is never called (model answers from memory)**
+The model doesn't support OpenAI function calling. Switch to a model that does (see [Model compatibility](#model-compatibility) above) or add a system prompt.
+
+**`[Errno 48] address already in use` on port 8090**
+Another agent process is already running. Kill it first: `lsof -ti:8090 | xargs kill`
 
 ## Monitoring
 
