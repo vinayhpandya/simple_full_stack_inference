@@ -27,7 +27,10 @@ from pydantic import BaseModel
 
 class _ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
+    tool_calls: Optional[list] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
 
 class FullChatRequest(BaseModel):
@@ -41,6 +44,8 @@ class FullChatRequest(BaseModel):
     presence_penalty: Optional[float] = None
     stop: Optional[list] = None
     n: Optional[int] = None
+    tools: Optional[list] = None
+    tool_choice: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +164,8 @@ def main() -> None:
                         )
                 resp.raise_for_status()
                 backend_data = resp.json()
-                return backend_data["choices"][0]["message"]["content"]
+                # Return the full response to preserve tool_calls / finish_reason.
+                return backend_data
             except httpx.HTTPStatusError as e:
                 snippet = (e.response.text or "").strip()[:1200]
                 detail = str(e).strip() or repr(e)
@@ -220,17 +226,29 @@ def main() -> None:
             reply = await backend.generate(chat_req)
         except Exception as e:
             reply = f"Gateway Error: {type(e).__name__}: {e}"
+
+        elapsed = time.perf_counter() - request.state.arrival_time
+
+        # reply is either a full OpenAI-compatible dict (from our patched generate)
+        # or a plain error string (from the except branches above).
+        if isinstance(reply, dict) and "choices" in reply:
+            choices = reply["choices"]
+            content_for_stream = (choices[0]["message"].get("content") or "") if choices else ""
+        else:
+            content_for_stream = str(reply)
+            choices = [{"message": {"role": "assistant", "content": content_for_stream}, "finish_reason": "stop"}]
+
         if chat_req.stream:
             return StreamingResponse(
-                generate_stream(req_id, reply),
+                generate_stream(req_id, content_for_stream),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
             )
-        elapsed = time.perf_counter() - request.state.arrival_time
+
         return {
             "id": req_id,
-            "choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": len(reply), "total_tokens": len(reply)},
+            "choices": choices,
+            "usage": {"prompt_tokens": 0, "completion_tokens": len(content_for_stream), "total_tokens": len(content_for_stream)},
             "metrics": {"queue_time": queue_time, "tftt": elapsed},
         }
 
