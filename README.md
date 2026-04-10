@@ -36,10 +36,10 @@ A production-grade AI inference platform demonstrating a full-stack LLM serving 
          │               │               │
          ▼               ▼               ▼
 ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐
-│ Prometheus  │  │  Modal vLLM  │  │ Anyscale DeepSeek│
+│ Prometheus  │  │  Modal vLLM  │  │ Anyscale (Qwen)  │
 │ (Port 9090) │◄─│  / SGLang    │  │  Ray Serve +     │
-│   Metrics   │  │  TinyLlama   │  │  vLLM DeepSeek   │
-└──────┬──────┘  └──────────────┘  │  V2-Lite-Chat    │
+│   Metrics   │  │  TinyLlama   │  │  vLLM Qwen2.5    │
+└──────┬──────┘  └──────────────┘  │  7B-Instruct     │
        │                           └──────────────────┘
        ▼
 ┌─────────────┐
@@ -56,7 +56,7 @@ A production-grade AI inference platform demonstrating a full-stack LLM serving 
 | **API Gateway** | Request routing, backend selection, and metrics | 8080 |
 | **Nginx** | Load balancer with SSE streaming support | 80 |
 | **Modal vLLM / SGLang** | TinyLlama-1.1B on Modal GPU (auto-scaling) | — (HTTPS) |
-| **Anyscale DeepSeek** | DeepSeek-V2-Lite-Chat via Ray Serve + vLLM on Anyscale | — (HTTPS) |
+| **Anyscale (Qwen)** | **Qwen2.5-7B-Instruct** via Ray Serve + vLLM on Anyscale (recommended for agent tool-calling) | — (HTTPS) |
 | **Prometheus** | Metrics collection and storage | 9090 |
 | **Grafana** | Metrics visualization and dashboards | 3000 |
 
@@ -66,7 +66,7 @@ A production-grade AI inference platform demonstrating a full-stack LLM serving 
 - [uv](https://github.com/astral-sh/uv) package manager
 - Docker Desktop (or another Docker engine) running, with Compose available
 - [Modal](https://modal.com) account (for GPU inference via vLLM / SGLang)
-- [Anyscale](https://www.anyscale.com) account (for DeepSeek MoE inference — optional)
+- [Anyscale](https://www.anyscale.com) account (for Qwen / optional DeepSeek MoE inference — optional)
 - **Nginx** (optional, for port 80): on macOS, `brew install nginx`; binding to port 80 usually requires `sudo`
 
 ## Setup
@@ -136,6 +136,8 @@ Copy the exact HTTPS origin from the CLI or [Modal dashboard](https://modal.com)
 ---
 
 ### 4b. (Optional) Deploy DeepSeek MoE to Anyscale via Ray Serve
+
+> **LangGraph agent users:** the default **`anyscale_service.yaml`** in this repo loads **Qwen2.5-7B-Instruct** for reliable `web_search` / tool calling. This subsection is an **optional alternative** if you want DeepSeek MoE instead.
 
 This deploys **DeepSeek-V2-Lite-Chat** — a **Mixture-of-Experts (MoE)** model with 16B total parameters but only **2.4B active parameters per token** — via **Ray Serve + vLLM** on Anyscale-managed GPUs.
 
@@ -473,13 +475,29 @@ gateway_launcher.py  →  Anyscale / Modal / local backend
 | `web_search` | DuckDuckGo search — no API key required |
 | `calculator` | Safe AST-based arithmetic evaluator — no `eval`, restricted to safe ops |
 
+### Anyscale model (Qwen — default for tool-calling)
+
+The agent needs a model that emits real **tool calls** (not plain-text role-play). This
+repo’s **`anyscale_service.yaml`** defaults to:
+
+- **`DEEPSEEK_MODEL_ID`:** `Qwen/Qwen2.5-7B-Instruct`
+- **`DEEPSEEK_SERVED_NAME`:** `deepseek` (API name clients send — keeps `gateway_config.yaml` and `GATEWAY_MODEL` unchanged)
+
+Deploy or update the service:
+
+```bash
+uv run anyscale service deploy -f anyscale_service.yaml
+```
+
+Section **4b** below documents an **alternative** (DeepSeek-V2-Lite-Chat MoE) if you want that backend instead; for the LangGraph agent with `web_search` / `calculator`, **use Qwen** as above.
+
 ### Prerequisites
 
 The gateway must already be configured and running (port 8080) before starting
 the agent. Follow the main setup steps first:
 
 1. `gateway_config.yaml` exists and has a valid backend URL (copy from `gateway_config.example.yaml`)
-2. Your inference backend (Anyscale or Modal) is deployed and reachable
+2. Your inference backend (Anyscale with Qwen, or Modal) is deployed and reachable
 3. `uv sync` has been run at least once
 
 ### Setup
@@ -511,12 +529,14 @@ You should see:
 INFO:     Uvicorn running on http://0.0.0.0:8090
 ```
 
+`Model: deepseek` is the **API name** (`DEEPSEEK_SERVED_NAME`); the weights loaded on Anyscale are **Qwen2.5-7B-Instruct** when you use the default `anyscale_service.yaml`.
+
 Environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
 | `GATEWAY_URL` | `http://localhost:8080` | Gateway base URL |
-| `GATEWAY_MODEL` | `deepseek` | Model name sent in requests |
+| `GATEWAY_MODEL` | `deepseek` | Model name in JSON requests (must match served name; default pairs with Qwen deploy) |
 | `AGENT_PORT` | `8090` | Port the agent listens on |
 
 ### Test
@@ -536,7 +556,7 @@ curl http://localhost:8090/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"What is the capital of France?"}]}'
 ```
 
-**3. Calculator** — should trigger the `calculator` tool:
+**3. Calculator** — should trigger the `calculator` tool (watch the agent terminal for `[agent] N tool round(s)`):
 
 ```bash
 curl http://localhost:8090/v1/chat/completions \
@@ -544,12 +564,35 @@ curl http://localhost:8090/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"What is (17 * 43) + 144?"}]}'
 ```
 
-**4. Web search** — should trigger the `web_search` tool:
+**4. Web search (`web_search` tool)** — needs **Qwen** (or another tool-capable model) on the gateway; verify the full stack:
 
 ```bash
-curl http://localhost:8090/v1/chat/completions \
+# After gateway + agent are running and Anyscale shows RUNNING:
+curl -s http://localhost:8090/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"What happened in AI news this week?"}]}'
+  -d '{"messages":[{"role":"user","content":"What happened in AI news this week?"}]}' \
+  | python -m json.tool
+```
+
+**What to check**
+
+- In the **agent** process stdout you should see **`[agent] 1 tool round(s) before final answer`** (or more if multiple tool steps). That means LangGraph executed `web_search` and fed the result back to the model.
+- The assistant reply should reflect **current** topics; if there is **no** tool-round line and the answer sounds generic or refuses to search, the backend is likely not Qwen or tools are not reaching the model (see **Troubleshooting** in this section below).
+
+**5. Web search — narrow query (easier to spot real results)**
+
+```bash
+curl -s http://localhost:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Search the web: latest OpenAI news today"}]}'
+```
+
+**6. Web search — explicit tool phrasing (optional)**
+
+```bash
+curl -s http://localhost:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Use web_search to find headlines about AI regulation this month."}]}'
 ```
 
 ### Observability
@@ -570,20 +613,22 @@ support — see below).
 
 ### Model compatibility
 
-Tool calling only works when the LLM emits a structured `tool_calls` response in
-OpenAI function-calling format. **Smaller models (e.g. DeepSeek-V2-Lite-Chat)
-often do not support this reliably** — they may describe their intent to use a
-tool in plain text but never emit the required JSON, so LangGraph never fires the
-tool.
+**Default for this repo:** deploy **Qwen2.5-7B-Instruct** on Anyscale (`DEEPSEEK_MODEL_ID`
+in `anyscale_service.yaml`). It emits real tool calls so `web_search` and
+`calculator` run inside the LangGraph loop.
 
-Models with reliable tool-calling support:
+Tool calling only works when the LLM emits a structured `tool_calls` response (and
+your gateway forwards the full response — see `gateway_launcher.py`). **DeepSeek-V2-Lite-Chat**
+often does **not** support this reliably for agent use — it may describe using a
+tool in plain text without emitting the required format.
 
-- `Qwen/Qwen2.5-7B-Instruct` (recommended — fits on a single A10G)
+Other models with reasonable tool-calling support:
+
 - `mistralai/Mistral-7B-Instruct-v0.3`
-- GPT-4 class models via OpenAI-compatible endpoints
+- GPT-4–class models via OpenAI-compatible endpoints
 
-To switch the backend model, update `DEEPSEEK_MODEL_ID` in `anyscale_service.yaml`
-and redeploy:
+To change the Anyscale weights, edit `DEEPSEEK_MODEL_ID` in `anyscale_service.yaml`
+(keep `DEEPSEEK_SERVED_NAME` aligned with `GATEWAY_MODEL` / gateway config) and redeploy:
 
 ```bash
 uv run anyscale service deploy -f anyscale_service.yaml
