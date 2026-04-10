@@ -23,16 +23,17 @@ Deploy:
   uv run anyscale service deploy -f anyscale_service.yaml
 
 Environment variables (set in anyscale_service.yaml env_vars):
-  DEEPSEEK_MODEL_ID     — HuggingFace repo (default: deepseek-ai/DeepSeek-V2-Lite-Chat)
+  DEEPSEEK_MODEL_ID     — HuggingFace repo (default: Qwen/Qwen2.5-7B-Instruct)
   DEEPSEEK_SERVED_NAME  — model name clients send in requests (default: deepseek)
   TENSOR_PARALLEL_SIZE  — number of GPUs per replica (default: 1)
-  HF_TOKEN              — HuggingFace token for gated-model access
+  HF_TOKEN              — HuggingFace token (not required for Qwen — model is not gated)
 """
 
 import json
 import os
+import re
 import uuid
-from typing import AsyncGenerator, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -44,7 +45,7 @@ from ray import serve
 # without needing vLLM installed on the head node)
 # ---------------------------------------------------------------------------
 
-MODEL_ID = os.environ.get("DEEPSEEK_MODEL_ID", "deepseek-ai/DeepSeek-V2-Lite-Chat")
+MODEL_ID = os.environ.get("DEEPSEEK_MODEL_ID", "Qwen/Qwen2.5-7B-Instruct")
 SERVED_MODEL_NAME = os.environ.get("DEEPSEEK_SERVED_NAME", "deepseek")
 TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", "1"))
 
@@ -54,7 +55,10 @@ TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", "1"))
 
 class _Message(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
+    tool_calls: Optional[List[Dict]] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -66,6 +70,8 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = 0.9
     stop: Optional[List[str]] = None
     n: int = 1
+    tools: Optional[List[Dict]] = None
+    tool_choice: Optional[str] = None
 
 # ---------------------------------------------------------------------------
 # FastAPI app — used as the Ray Serve ingress
@@ -140,20 +146,70 @@ class DeepSeekDeployment:
             self._tokenizer = await self._engine.get_tokenizer()
         return self._tokenizer
 
-    async def _build_prompt(self, messages: List[_Message]) -> str:
-        """
-        Apply the model's own chat template via the HuggingFace tokenizer.
+    async def _build_prompt(
+        self, messages: List[_Message], tools: Optional[List[Dict]] = None
+    ) -> str:
+        """Apply the model's chat template, including tool definitions if provided.
 
-        DeepSeek-V2 ships a Jinja2 chat template inside its tokenizer config;
-        using it here ensures the exact same formatting as the official demo.
+        Falls back to a prompt without tools if the tokenizer's template does not
+        support the tools kwarg (e.g. an older transformers installation).
         """
         tokenizer = await self._get_tokenizer()
-        raw = [{"role": m.role, "content": m.content} for m in messages]
+        raw = []
+        for m in messages:
+            msg: Dict = {"role": m.role, "content": m.content or ""}
+            if m.tool_calls:
+                msg["tool_calls"] = m.tool_calls
+            if m.tool_call_id:
+                msg["tool_call_id"] = m.tool_call_id
+            if m.name:
+                msg["name"] = m.name
+            raw.append(msg)
+        if tools:
+            try:
+                return tokenizer.apply_chat_template(
+                    raw,
+                    tools=tools,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception as exc:
+                print(f"[LLMDeployment] apply_chat_template with tools failed "
+                      f"({exc!r}), retrying without tools")
         return tokenizer.apply_chat_template(
-            raw,
-            tokenize=False,
-            add_generation_prompt=True,
+            raw, tokenize=False, add_generation_prompt=True
         )
+
+    def _parse_tool_calls(self, text: str):
+        """Parse Qwen2.5 <tool_call> blocks into OpenAI tool_calls format.
+
+        Returns (tool_calls, content) where tool_calls is None if no calls found.
+        """
+        pattern = r"<tool_call>\s*(.*?)\s*</tool_call>"
+        matches = re.findall(pattern, text, re.DOTALL)
+        if not matches:
+            return None, text
+
+        tool_calls = []
+        for match in matches:
+            try:
+                call = json.loads(match)
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": call["name"],
+                        "arguments": json.dumps(call.get("arguments", {})),
+                    },
+                })
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        if not tool_calls:
+            return None, text
+
+        clean = re.sub(pattern, "", text, flags=re.DOTALL).strip()
+        return tool_calls, clean or None
 
     # ------------------------------------------------------------------
     # OpenAI-compatible endpoints
@@ -163,7 +219,13 @@ class DeepSeekDeployment:
     async def chat_completions(self, body: ChatCompletionRequest) -> JSONResponse:
         from vllm.sampling_params import SamplingParams
 
-        prompt = await self._build_prompt(body.messages)
+        try:
+            prompt = await self._build_prompt(body.messages, tools=body.tools)
+        except Exception as exc:
+            print(f"[LLMDeployment] _build_prompt failed: {exc!r}")
+            return JSONResponse(
+                {"error": f"Prompt build error: {exc}"}, status_code=500
+            )
         sampling_params = SamplingParams(
             max_tokens=body.max_tokens,
             temperature=body.temperature,
@@ -185,6 +247,25 @@ class DeepSeekDeployment:
         async for output in self._engine.generate(prompt, sampling_params, request_id):
             if output.outputs:
                 final_text = output.outputs[0].text
+
+        # Parse Qwen-style <tool_call> blocks and return in OpenAI tool_calls format.
+        tool_calls, content = self._parse_tool_calls(final_text)
+        if tool_calls:
+            return JSONResponse({
+                "id": request_id,
+                "object": "chat.completion",
+                "model": SERVED_MODEL_NAME,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content,
+                        "tool_calls": tool_calls,
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            })
 
         return JSONResponse({
             "id": request_id,
