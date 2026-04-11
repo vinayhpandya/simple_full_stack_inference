@@ -1,0 +1,25 @@
+# lmcache_config.yaml
+# Tuned for ShareGPT workloads — long shared prefixes, high reuse rate
+
+chunk_size: 256               # KV cache chunk size in tokens; 256 is sweet spot
+                              # for ShareGPT which has ~128-512 token system prompts
+
+local_cpu:
+  enable: true
+  max_cache_size_gb: 20       # each A10G container gets 20GB CPU RAM for KV offload
+                              # Modal gives ~60GB system RAM per A10G container
+
+retrieval_timeout_ms: 100     # drop cache lookup if it takes >100ms — keeps
+                              # latency predictable under load
+
+# Remote backend (disabled — all reuse is within-replica via CPU RAM)
+# Enable this if you want cross-replica KV sharing via Redis:
+# remote:
+#   enable: true
+#   type: redis
+#   host: YOUR_REDIS_HOST
+#   port: 6379
+
+# Token threshold: only cache chunks with at least this many matching prefix tokens
+# Reduces cache pollution from short/unique prompts in the benchmark
+min_token_threshold: 128
